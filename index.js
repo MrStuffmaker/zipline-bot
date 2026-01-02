@@ -37,13 +37,16 @@ const ANON_UPLOAD_EXPIRY = config.anonymousUploadExpiry || null;
 const DATA_DIR = './data';
 const TOKENS_FILE = path.join(DATA_DIR, 'userTokens.json');
 const SETTINGS_FILE = path.join(DATA_DIR, 'userSettings.json');
+const IDS_FILE = path.join(DATA_DIR, 'userIds.json');
 
 if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR);
 if (!fs.existsSync(TOKENS_FILE)) fs.writeFileSync(TOKENS_FILE, '{}');
 if (!fs.existsSync(SETTINGS_FILE)) fs.writeFileSync(SETTINGS_FILE, '{}');
+if (!fs.existsSync(IDS_FILE)) fs.writeFileSync(IDS_FILE, '{}');
 
 let userTokens = JSON.parse(fs.readFileSync(TOKENS_FILE, 'utf8'));
 let userSettings = JSON.parse(fs.readFileSync(SETTINGS_FILE, 'utf8'));
+let userIds = JSON.parse(fs.readFileSync(IDS_FILE, 'utf8'));
 
 const webhook = config.errorWebhookUrl ? new WebhookClient({ url: config.errorWebhookUrl }) : null;
 
@@ -65,10 +68,38 @@ function logError(error, ctx = '') {
 // Token and settings management
 function saveTokens() { fs.writeFileSync(TOKENS_FILE, JSON.stringify(userTokens, null, 2)); }
 function saveSettings() { fs.writeFileSync(SETTINGS_FILE, JSON.stringify(userSettings, null, 2)); }
+function saveIds() { fs.writeFileSync(IDS_FILE, JSON.stringify(userIds, null, 2)); }
 
 function getUserToken(userId) { return userTokens[userId] || null; }
 function setUserToken(userId, token) { userTokens[userId] = token; saveTokens(); }
 function deleteUserToken(userId) { delete userTokens[userId]; saveTokens(); }
+
+function getBotUserId(discordUserId) {
+  return userIds[discordUserId] || null;
+}
+
+function ensureAssignBotUserId(discordUserId) {
+  if (userIds[discordUserId]) return userIds[discordUserId];
+
+  // Find highest existing numeric id
+  const existing = Object.values(userIds).map(v => parseInt(v, 10)).filter(n => !isNaN(n));
+  const next = (existing.length ? Math.max(...existing) : 0) + 1;
+  userIds[discordUserId] = next;
+  saveIds();
+  return next;
+}
+
+// On startup, ensure all existing token-holders have a bot user ID
+try {
+  Object.keys(userTokens).forEach(uid => {
+    if (!userIds[uid]) {
+      ensureAssignBotUserId(uid);
+      logInfo(`Assigned bot user ID ${userIds[uid]} to existing user ${uid}`);
+    }
+  });
+} catch (e) {
+  logWarn('Failed to assign IDs to existing users: ' + e.message);
+}
 
 function getUserSettings(userId) {
   return userSettings[userId] || { expiry: null, compression: null };
@@ -111,7 +142,9 @@ async function ziplineGetMe(token) {
     headers: { Authorization: token }
   });
   if (!res.ok) throw new Error(`Zipline /api/user error ${res.status}`);
-  return res.json();
+  const data = await res.json();
+  // The API wraps the user data in a 'user' property
+  return data.user || data;
 }
 
 // Fetch one page of uploads
@@ -403,9 +436,16 @@ function getReadableOSName() {
 
 // Zipline stats API
 async function ziplineGetStats() {
-  const res = await fetch(`${ZIPLINE_BASE_URL}/api/stats`);
+  const res = await fetch(`${ZIPLINE_BASE_URL}/api/stats`, {
+    headers: { Authorization: ANON_ZIPLINE_TOKEN }
+  });
   if (!res.ok) throw new Error(`Zipline /api/stats error ${res.status}`);
-  return res.json();
+  const statsArray = await res.json();
+  // The API returns an array; get the first (latest) entry's data
+  if (Array.isArray(statsArray) && statsArray.length > 0 && statsArray[0].data) {
+    return statsArray[0].data;
+  }
+  return {};
 }
 
 // Interaction handler
@@ -424,11 +464,13 @@ client.on(Events.InteractionCreate, async interaction => {
 
         if (validation.valid) {
           setUserToken(userId, token);
+          const botUserId = ensureAssignBotUserId(userId);
           const embed = new EmbedBuilder()
             .setTitle('✅ Token Valid & Saved!')
             .setDescription(`**User:** ${validation.user}\n**Role:** ${validation.role}\n**Storage:** ${validation.quota.used}/${validation.quota.max}`)
             .addFields(
-              { name: '🔗 Zipline', value: `[Open Dashboard](${ZIPLINE_BASE_URL})`, inline: true }
+              { name: '🔗 Zipline', value: `[Open Dashboard](${ZIPLINE_BASE_URL})`, inline: true },
+              { name: '🆔 Bot User ID', value: String(botUserId), inline: true }
             )
             .setColor(0x00ff00)
             .setThumbnail(interaction.user.displayAvatarURL({ format: 'png', size: 1024 }));
@@ -476,15 +518,15 @@ client.on(Events.InteractionCreate, async interaction => {
         const commandId = '1441450591409668117';
 
         const subcommands = [
-          { key: 'settoken', label: 'settoken 🔐', desc: 'Set your Zipline API token' },
-          { key: 'logout', label: 'logout 🚪', desc: 'Delete token (logout)' },
-          { key: 'me', label: 'me 👤', desc: 'Show your account info' },
-          { key: 'list', label: 'list 📂', desc: 'List your uploads' },
-          { key: 'upload', label: 'upload 📤', desc: 'Upload a file' },
-          { key: 'settings', label: 'settings ⚙️', desc: 'Manage your default upload settings' },
-          { key: 'invite', label: 'invite 🤖', desc: 'Show bot invite link' },
-          { key: 'about', label: 'about ℹ️', desc: 'Info about the bot and its commands' },
-          { key: 'stats', label: 'stats 📊', desc: 'Show host/server resource usage, Zipline stats, and your storage usage' }
+          { key: 'settoken', label: '🔐', desc: 'Set your Zipline API token' },
+          { key: 'logout', label: '🚪', desc: 'Delete token (logout)' },
+          { key: 'me', label: '👤', desc: 'Show your account info' },
+          { key: 'list', label: '📂', desc: 'List your uploads' },
+          { key: 'upload', label: '📤', desc: 'Upload a file' },
+          { key: 'settings', label: '⚙️', desc: 'Manage your default upload settings' },
+          { key: 'invite', label: '🤖', desc: 'Show bot invite link' },
+          { key: 'about', label: 'ℹ️', desc: 'Info about the bot and its commands' },
+          { key: 'stats', label: '📊', desc: 'Show host/server resource usage, Zipline stats, and your storage usage' }
         ];
 
         const commandsLines = subcommands.map(sc => {
@@ -498,13 +540,13 @@ client.on(Events.InteractionCreate, async interaction => {
             new ButtonBuilder()
               .setLabel('Support')
               .setStyle(ButtonStyle.Link)
-              .setURL('https://discord.gg/support')
-              .setEmoji('🆘'),
+              .setURL('https://discord.fish/support')
+              .setEmoji('<:support:1449887982587740312>'),
             new ButtonBuilder()
               .setLabel('GitHub')
               .setStyle(ButtonStyle.Link)
-              .setURL('https://github.com/yourrepo')
-              .setEmoji('🐙')
+              .setURL('https://github.com/MrStuffmaker/zipline-bot')
+              .setEmoji('<:github:1449887984626434169>')
           );
 
         await interaction.editReply({
@@ -559,14 +601,44 @@ client.on(Events.InteractionCreate, async interaction => {
 
         await interaction.deferReply({ flags: MessageFlags.Ephemeral });
         const data = await ziplineGetMe(token);
+        const botUserId = getBotUserId(userId) || ensureAssignBotUserId(userId);
+
+        // Try to get user storage from Zipline stats; fall back to quota if available
+        let userStorage = 0;
+        try {
+          const zipStats = await ziplineGetStats();
+          if (zipStats.filesUsers && Array.isArray(zipStats.filesUsers)) {
+            const userFileData = zipStats.filesUsers.find(u => u.username === (data.username || ''));
+            if (userFileData) userStorage = userFileData.storage || 0;
+          }
+        } catch {
+          // ignore
+        }
+
+        // If API provides quota info on the user object, prefer that for display
+        const quota = data.quota || null;
+
+        const formatStorage = (bytes) => {
+          if (!bytes || bytes === 0) return '0 MB';
+          const mb = bytes / (1024 * 1024);
+          if (mb > 1024) return (mb / 1024).toFixed(2) + ' GB';
+          return mb.toFixed(2) + ' MB';
+        };
+
+        const storageDisplay = quota && typeof quota.used !== 'undefined' && typeof quota.max !== 'undefined'
+          ? `${formatStorage(quota.used)} / ${quota.max}`
+          : formatStorage(userStorage || 0);
+
         const embed = new EmbedBuilder()
           .setTitle('👤 Account Info')
           .addFields(
             { name: 'Username', value: data.username || 'Unknown', inline: true },
             { name: 'Role', value: data.role || 'Unknown', inline: true },
-            { name: 'Storage', value: `${data.quota?.used || 0}/${data.quota?.max || '∞'}`, inline: false }
+            { name: '🆔 Bot User ID', value: String(botUserId), inline: true },
+            { name: '📦 Storage', value: storageDisplay, inline: false }
           )
           .setColor(0x00ff00);
+
         await interaction.editReply({ embeds: [embed] });
         return;
       }
@@ -662,8 +734,34 @@ client.on(Events.InteractionCreate, async interaction => {
         try {
           userMe = await ziplineGetMe(token);
         } catch {
-          userMe = { username: 'Unknown', quota: { used: 0, max: 0 } };
+          userMe = { username: 'Unknown' };
         }
+
+        // Calculate user storage from the stats filesUsers array
+        let userStorage = 0;
+        if (zipStats.filesUsers && Array.isArray(zipStats.filesUsers)) {
+          const userFileData = zipStats.filesUsers.find(u => u.username === userMe.username);
+          if (userFileData) {
+            userStorage = userFileData.storage || 0;
+          }
+        }
+
+        const uptimeSeconds = hostStats.uptime;
+        const days = Math.floor(uptimeSeconds / 86400);
+        const hours = Math.floor((uptimeSeconds % 86400) / 3600);
+        const minutes = Math.floor((uptimeSeconds % 3600) / 60);
+        const uptimeDisplay = `${days}d/${String(hours).padStart(2, '0')}h/${String(minutes).padStart(2, '0')}m`;
+
+        // Format storage to MB or GB
+        const formatStorage = (bytes) => {
+          const mb = bytes / (1024 * 1024);
+          if (mb > 1024) {
+            return (mb / 1024).toFixed(2) + ' GB';
+          }
+          return mb.toFixed(2) + ' MB';
+        };
+
+        const userStorageDisplay = formatStorage(userStorage);
 
         const embed = new EmbedBuilder()
           .setTitle('📊 Server & Zipline Stats')
@@ -672,7 +770,7 @@ client.on(Events.InteractionCreate, async interaction => {
               name: '🖥️ Host System',
               value:
                 `**OS:** ${hostStats.os}\n` +
-                `**Uptime:** ${(hostStats.uptime / 3600).toFixed(2)}h\n` +
+                `**Uptime:** ${uptimeDisplay}\n` +
                 `**CPUs:** ${hostStats.cpuCount}\n` +
                 `**RAM:** ${(hostStats.usedMem / (1024 * 1024)).toFixed(2)}MB / ${(hostStats.freeMem / (1024 * 1024)).toFixed(2)}MB`,
               inline: true
@@ -683,14 +781,15 @@ client.on(Events.InteractionCreate, async interaction => {
                 ? `❌ ${zipStats.error}`
                 : `**Users:** ${zipStats.users ?? '?'}\n` +
                   `**Files:** ${zipStats.files ?? '?'}\n` +
-                  `**Size:** ${zipStats.size ? (zipStats.size / (1024 * 1024 * 1024)).toFixed(2) + ' GB' : '?'}`,
+                  `**Used Storage:** ${zipStats.storage ? (zipStats.storage / (1024 * 1024 * 1024)).toFixed(2) + ' GB' : '?'}\n` +
+                  `**File Views:** ${zipStats.fileViews ?? '?'}\n` +
+                  `**URLs:** ${zipStats.urls ?? '?'}`,
               inline: true
             },
             {
-              name: `👤 ${userMe.username ?? 'You'}`,
+              name: `👤 ${userMe.username ?? 'Unknown'}`,
               value:
-                `**Used:** ${((userMe.quota && userMe.quota.used ? userMe.quota.used : 0) / (1024 * 1024)).toFixed(2)} MB\n` +
-                `**Max:** ${userMe.quota && userMe.quota.max ? (userMe.quota.max / (1024 * 1024)).toFixed(2) + ' MB' : '∞'}`,
+                `**Used:** ${userStorageDisplay}`,
               inline: false
             }
           )

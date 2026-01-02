@@ -1,7 +1,8 @@
 {
   "name": "zipline-discord-integration",
-  "version": "0.0.5",
+  "version": "0.0.6",
   "main": "index.js",
+  "type": "module",
   "scripts": {
     "start": "node index.js",
     "deploy-commands": "node commands.js"

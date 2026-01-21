@@ -1,6 +1,6 @@
 {
   "name": "zipline-discord-integration",
-  "version": "0.0.6",
+  "version": "0.2.2",
   "main": "index.js",
   "type": "module",
   "scripts": {
